@@ -30,7 +30,12 @@ class Settings(BaseSettings):
 
     # ── AI / LLM ───────────────────────────────────────────────────
     OPENAI_API_KEY: str = ""
+    OPENAI_BASE_URL: str | None = None
     ANTHROPIC_API_KEY: str = ""
+
+    # ── Email (Resend) ────────────────────────────────────────────
+    RESEND_API_KEY: str = ""
+    EMAIL_FROM_ADDRESS: str = "LeadForge <noreply@leadforge.dev>"
 
     # ── JWT Authentication ─────────────────────────────────────────
     JWT_SECRET: str

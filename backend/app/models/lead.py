@@ -90,6 +90,11 @@ class Lead(Base):
         default=LeadStatus.new,
         nullable=False,
     )
+    content_hash: Mapped[str] = mapped_column(
+        String(64),
+        nullable=True,
+        index=True,
+    )
     embedding: Mapped[list[float] | None] = mapped_column(
         Vector(1536),
         nullable=True,

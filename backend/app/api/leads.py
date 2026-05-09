@@ -1,12 +1,13 @@
-"""Lead listing, detail, and update endpoints with advanced filtering."""
+"""Lead listing, detail, update, and semantic search endpoints."""
 
 import logging
 import uuid
 from math import ceil
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import or_, select
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, status
+from pgvector.sqlalchemy import Vector
+from sqlalchemy import func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user
@@ -190,3 +191,80 @@ async def update_lead(
     await db.flush()
     await db.refresh(lead)
     return lead
+
+
+# ---------------------------------------------------------------------------
+# POST /leads/search/semantic
+# ---------------------------------------------------------------------------
+@router.post("/search/semantic", summary="Semantic similarity search for leads")
+async def semantic_search(
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(get_current_user)],
+    query: str = Body(..., min_length=2, description="Natural language search query"),
+    limit: int = Body(20, ge=1, le=100, description="Max results to return"),
+    min_score: float | None = Body(None, ge=0, le=1, description="Minimum cosine similarity (0-1)"),
+) -> dict:
+    """Find leads semantically similar to a natural language query.
+
+    Generates an embedding for the query using ``text-embedding-3-small``
+    and performs a cosine similarity search against lead embeddings via
+    pgvector.  Results are scoped to the authenticated user's sources only.
+
+    Returns results ordered by similarity score (most relevant first).
+    Each result includes a ``similarity`` field (0-1, higher = more relevant).
+    """
+    from app.services.lead_scoring import LeadScoringService
+
+    if not settings_is_openai_configured():
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Semantic search requires OPENAI_API_KEY to be configured",
+        )
+
+    # 1. Generate embedding for the query
+    scoring_svc = LeadScoringService()
+    query_embedding = await scoring_svc.generate_embedding(query)
+    if query_embedding is None:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to generate query embedding",
+        )
+
+    # 2. Perform cosine similarity search via pgvector
+    #    The <=> operator is the cosine distance operator from pgvector.
+    #    We wrap it in 1 - <=> to get cosine *similarity* (higher = better).
+    similarity_threshold = min_score if min_score is not None else 0.0
+
+    stmt = (
+        select(
+            Lead,
+            (1 - Lead.embedding.cosine_distance(query_embedding)).label("similarity"),
+        )
+        .join(JobSource, Lead.source_id == JobSource.id)
+        .where(
+            JobSource.user_id == current_user.id,
+            Lead.embedding.isnot(None),
+        )
+        .order_by(text("similarity DESC"))
+        .limit(limit)
+    )
+
+    rows = (await db.execute(stmt)).all()
+
+    results = []
+    for lead, similarity in rows:
+        if similarity < similarity_threshold:
+            continue
+        item = LeadResponse.model_validate(lead, from_attributes=True)
+        results.append({
+            **item.model_dump(),
+            "similarity": round(float(similarity), 4),
+        })
+
+    return {"items": results, "query": query, "total": len(results)}
+
+
+def settings_is_openai_configured() -> bool:
+    """Check if OpenAI API key is available for embedding generation."""
+    from app.config import settings
+    return bool(settings.OPENAI_API_KEY)

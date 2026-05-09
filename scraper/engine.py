@@ -1,13 +1,18 @@
-"""Core scraping engine that wraps ScrapeGraphAI for intelligent job extraction."""
+"""Core scraping engine that wraps ScrapeGraphAI for intelligent job extraction.
+
+Implements a layered LLM fallback strategy so that scraping remains resilient
+even when the primary model hallucinates, times out, or returns empty results.
+"""
 
 import logging
 import os
-import re
 from dataclasses import dataclass, field
 from typing import Any, Optional
 from urllib.parse import urlparse
 
 from loguru import logger
+
+from scraper.utils.normalizer import generate_content_hash, normalize_url
 from scraper.utils.rate_limiter import RateLimiter
 
 
@@ -16,17 +21,28 @@ class ScraperConfig:
     """Configuration for the scraping engine.
 
     Attributes:
-        model: LLM model identifier for ScrapeGraphAI.
+        model: Primary LLM model identifier for ScrapeGraphAI.
+        fallback_models: Ordered list of fallback model names to try when
+            the primary model fails (timeout, empty result, API error).
         temperature: Sampling temperature for the LLM (lower = more deterministic).
         headless: Whether to run the browser in headless mode.
         max_pages: Maximum number of pages to scrape per source.
         delay: Delay in seconds between consecutive requests.
         timeout: HTTP request timeout in seconds.
         verbose: Enable verbose logging from ScrapeGraphAI.
+        max_retries_per_model: How many times to retry each model before
+            falling back to the next one.
     """
 
     model: str = field(
         default_factory=lambda: os.getenv("SGAI_MODEL", "gpt-4o-mini")
+    )
+    fallback_models: list[str] = field(
+        default_factory=lambda: [
+            m.strip()
+            for m in os.getenv("SGAI_FALLBACK_MODELS", "").split(",")
+            if m.strip()
+        ]
     )
     temperature: float = field(
         default_factory=lambda: float(os.getenv("SGAI_TEMPERATURE", "0.1"))
@@ -40,6 +56,16 @@ class ScraperConfig:
         default_factory=lambda: int(os.getenv("SCRAPER_TIMEOUT", "30"))
     )
     verbose: bool = True
+    max_retries_per_model: int = 1
+
+    @property
+    def all_models(self) -> list[str]:
+        """Return primary model followed by fallbacks."""
+        models = [self.model]
+        for fb in self.fallback_models:
+            if fb not in models:
+                models.append(fb)
+        return models
 
 
 class ScraperEngine:
@@ -49,10 +75,16 @@ class ScraperEngine:
     scraper class from the registry, builds a ScrapeGraphAI ``SmartScraperGraph``,
     and normalises the raw result into a uniform job-listing schema.
 
+    LLM Fallback Strategy
+    ---------------------
+    If the primary model fails (timeout, API error, or returns empty results),
+    the engine automatically falls back to the next model in the configured
+    chain.  This ensures scraping resilience without manual intervention.
+
     Example::
 
         engine = ScraperEngine()
-        jobs = await engine scrape(job_source)
+        jobs = await engine.scrape(job_source)
     """
 
     def __init__(self, config: Optional[ScraperConfig] = None) -> None:
@@ -68,7 +100,10 @@ class ScraperEngine:
         self._rate_limiter.set_rate("upwork.com", 0.33)
         self._rate_limiter.set_rate("www.indeed.com", 0.5)
         self._rate_limiter.set_rate("indeed.com", 0.5)
-        logger.info(f"ScraperEngine initialized with model={self.config.model}")
+        logger.info(
+            f"ScraperEngine initialized with model={self.config.model}, "
+            f"fallbacks={self.config.fallback_models}"
+        )
 
     # ------------------------------------------------------------------
     # Platform detection
@@ -180,15 +215,15 @@ class ScraperEngine:
     async def scrape(self, source: Any) -> list[dict]:
         """Scrape a job source and return normalised job listings.
 
+        Implements a layered LLM fallback: if the primary model fails or
+        returns empty results, each fallback model is tried in order before
+        giving up.
+
         Args:
             source: Any object with a ``url`` attribute, or a plain URL string.
 
         Returns:
             A list of normalised job dictionaries.
-
-        Raises:
-            ImportError: If *scrapegraphai* is not installed.
-            Exception: Propagated when the underlying scraper fails.
         """
         from scraper.scrapers import SCRAPER_REGISTRY
 
@@ -213,42 +248,112 @@ class ScraperEngine:
         scraper = scraper_class(config=self.config)
         prompt: str = scraper.get_prompt()
 
-        try:
-            from scrapegraphai.graphs import SmartScraperGraph  # type: ignore[import-untyped]
+        # ── Layered LLM fallback strategy ──────────────────────────────
+        last_error: Exception | None = None
+        models_to_try = self.config.all_models
 
-            self._graph = SmartScraperGraph(
-                prompt=prompt,
-                source=url,
-                config={
-                    "llm": {
-                        "model": self.config.model,
-                        "temperature": self.config.temperature,
-                        "api_key": os.getenv("OPENAI_API_KEY", ""),
-                    },
-                    "headless": self.config.headless,
-                    "verbose": self.config.verbose,
-                },
-            )
+        for model_name in models_to_try:
+            try:
+                result = await self._scrape_with_model(
+                    prompt=prompt,
+                    source=url,
+                    model_name=model_name,
+                    api_key=os.getenv("OPENAI_API_KEY", ""),
+                    base_url=os.getenv("OPENAI_BASE_URL"),
+                )
 
-            result: Any = self._graph.run()
-            logger.info(
-                f"Scrape completed for {url}, raw result keys: "
-                f"{list(result.keys()) if isinstance(result, dict) else 'N/A'}"
-            )
+                if not result:
+                    logger.warning(
+                        f"Model {model_name} returned empty result for {url}"
+                    )
+                    last_error = ValueError(f"Empty result from {model_name}")
+                    continue  # try next fallback
 
-            # Normalise results
-            jobs = self._normalize_results(result, platform)
-            logger.info(f"Normalized {len(jobs)} job listings from {url}")
-            return jobs
+                # Normalise results (includes URL normalization)
+                jobs = self._normalize_results(result, platform)
+                logger.info(
+                    f"Scrape completed for {url} using {model_name}, "
+                    f"{len(jobs)} job listings extracted"
+                )
+                return jobs
 
-        except ImportError:
-            logger.error(
-                "scrapegraphai not installed. Run: pip install scrapegraphai"
-            )
-            return []
-        except Exception as exc:
-            logger.error(f"Scraping failed for {url}: {exc}")
-            raise
+            except ImportError:
+                logger.error(
+                    "scrapegraphai not installed. Run: pip install scrapegraphai"
+                )
+                return []
+            except Exception as exc:
+                last_error = exc
+                logger.warning(
+                    f"Model {model_name} failed for {url}: {exc}. "
+                    f"Trying next fallback..."
+                )
+                continue
+
+        # All models exhausted
+        logger.error(
+            f"All {len(models_to_try)} models failed for {url}. "
+            f"Last error: {last_error}"
+        )
+        if last_error:
+            raise last_error
+        return []
+
+    async def _scrape_with_model(
+        self,
+        prompt: str,
+        source: str,
+        model_name: str,
+        api_key: str,
+        base_url: str | None = None,
+    ) -> Any:
+        """Run ScrapeGraphAI with a specific model configuration.
+
+        Parameters
+        ----------
+        prompt:
+            Extraction prompt for the target platform.
+        source:
+            URL to scrape.
+        model_name:
+            LLM model identifier (e.g. "gpt-4o-mini").
+        api_key:
+            API key for the LLM provider.
+        base_url:
+            Optional custom base URL (for OpenRouter, etc.).
+
+        Returns
+        -------
+        Any
+            Raw result from ``SmartScraperGraph.run()``.
+        """
+        from scrapegraphai.graphs import SmartScraperGraph  # type: ignore[import-untyped]
+
+        llm_config: dict[str, Any] = {
+            "model": model_name,
+            "temperature": self.config.temperature,
+            "api_key": api_key,
+        }
+        if base_url:
+            llm_config["base_url"] = base_url
+
+        self._graph = SmartScraperGraph(
+            prompt=prompt,
+            source=source,
+            config={
+                "llm": llm_config,
+                "headless": self.config.headless,
+                "verbose": self.config.verbose,
+            },
+        )
+
+        result: Any = self._graph.run()
+        logger.info(
+            f"Model {model_name} returned for {source}, "
+            f"raw result keys: "
+            f"{list(result.keys()) if isinstance(result, dict) else 'N/A'}"
+        )
+        return result
 
     # ------------------------------------------------------------------
     # Normalisation helpers
@@ -260,6 +365,10 @@ class ScraperEngine:
         The raw ScrapeGraphAI result may be a single dict (one job), a dict whose
         values contain lists, or a plain list.  This method handles all cases and
         returns a uniform list of job dictionaries.
+
+        URLs are normalized using :func:`~scraper.utils.normalizer.normalize_url`
+        and a content hash is pre-computed for deduplication using
+        :func:`~scraper.utils.normalizer.generate_content_hash`.
 
         Args:
             result: The raw result returned by ``SmartScraperGraph.run()``.
@@ -294,19 +403,28 @@ class ScraperEngine:
         for job in jobs:
             if not isinstance(job, dict):
                 continue
+
+            title = job.get("title", "")
+            company = job.get("company", "")
+            location = job.get("location", "")
+            raw_url = job.get("url", "")
+            normalized_url = normalize_url(raw_url) if raw_url else ""
+
             normalized.append(
                 {
-                    "title": job.get("title", ""),
-                    "company": job.get("company", ""),
-                    "location": job.get("location", ""),
+                    "title": title,
+                    "company": company,
+                    "location": location,
                     "salary": str(job.get("salary", "")),
                     "description": job.get("description", ""),
                     "requirements": job.get("requirements", ""),
-                    "url": job.get("url", ""),
+                    "url": normalized_url,
                     "skills": job.get("skills", []),
                     "platform": platform,
                     "raw_data": job,
                     "contact_info": {},
+                    # Pre-computed content hash for deduplication
+                    "content_hash": generate_content_hash(title, company, location),
                 }
             )
 

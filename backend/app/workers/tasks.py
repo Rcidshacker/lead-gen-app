@@ -154,6 +154,7 @@ def scrape_source_task(self, source_id: str, job_id: str | None = None) -> dict:
                     url=item_url,
                     raw_data=item.get("raw_data", {}),
                     contact_info=item.get("contact_info", {}),
+                    content_hash=item.get("content_hash"),
                     status=LeadStatus.new,
                 )
                 db.add(lead)
@@ -162,6 +163,7 @@ def scrape_source_task(self, source_id: str, job_id: str | None = None) -> dict:
 
             # ── Batch score all new leads in a single event loop ────────
             leads_created = 0
+            scores: list[float] = []
             scoring_service = LeadScoringService()
             if leads_to_score:
                 try:
@@ -177,8 +179,24 @@ def scrape_source_task(self, source_id: str, job_id: str | None = None) -> dict:
                         lead.score = score
                 except Exception as exc:
                     logger.warning("Batch scoring failed: %s — defaulting all to 50", exc)
+                    scores = [50.0] * len(leads_to_score)
                     for lead, _ in leads_to_score:
                         lead.score = 50.0
+
+                # ── Generate embeddings for semantic search ──────────
+                try:
+                    embedding_texts = [
+                        f"{ld.get('title', '')} {ld.get('company', '')} {ld.get('description', '')[:500]}"
+                        for _, ld in leads_to_score
+                    ]
+                    embeddings = _run_async(
+                        scoring_service.generate_embeddings_batch(embedding_texts)
+                    )
+                    for (lead, _), emb in zip(leads_to_score, embeddings):
+                        if emb is not None:
+                            lead.embedding = emb
+                except Exception as exc:
+                    logger.warning("Embedding generation failed: %s", exc)
 
                 leads_created = len(leads_to_score)
 
@@ -187,6 +205,37 @@ def scrape_source_task(self, source_id: str, job_id: str | None = None) -> dict:
             job.completed_at = datetime.now(timezone.utc)
             job.leads_found = leads_created
             db.commit()
+
+            # ── Send digest email notification ──────────────────────────
+            try:
+                from app.services.email_service import email_service
+                from app.models.user import User
+
+                if email_service.is_enabled and leads_to_score:
+                    owner = db.get(User, source.user_id)
+                    if owner:
+                        scored_leads = list(zip(leads_to_score, scores))
+                        high_priority = [(ld, sc) for (ld, _), sc in scored_leads if sc >= 75]
+                        top_leads = sorted(scored_leads, key=lambda x: x[1], reverse=True)[:5]
+
+                        _run_async(
+                            email_service.send_digest_email(
+                                to_email=owner.email,
+                                subject=f"LeadForge: {leads_created} new leads from {source.name}",
+                                scrape_results={
+                                    "source_name": source.name,
+                                    "platform": source.platform.value if hasattr(source.platform, 'value') else str(source.platform),
+                                    "leads_found": leads_created,
+                                    "high_priority_count": len(high_priority),
+                                    "top_leads": [
+                                        {"title": ld.title, "company": ld.company, "location": ld.location, "score": sc}
+                                        for (ld, _), sc in top_leads
+                                    ],
+                                },
+                            )
+                        )
+            except Exception as exc:
+                logger.warning("Email notification failed: %s", exc)
 
             logger.info(
                 "Scrape completed: source=%s, leads=%d", source_id, leads_created
