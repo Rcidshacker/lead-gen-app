@@ -1,10 +1,13 @@
-"""Export endpoints — trigger, list, and retrieve data exports."""
+"""Export endpoints — trigger, list, retrieve, and download data exports."""
 
 import logging
+import os
 import uuid
+from pathlib import Path
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi.responses import FileResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -138,3 +141,63 @@ async def get_export(
     # Append download-ready status
     resp["download_ready"] = bool(export.file_url)
     return resp
+
+
+# ---------------------------------------------------------------------------
+# GET /exports/{export_id}/download
+# ---------------------------------------------------------------------------
+@router.get("/{export_id}/download", summary="Download an export file")
+async def download_export(
+    export_id: uuid.UUID,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> FileResponse:
+    """Stream the export file to the client as a download.
+
+    Returns 404 if the export record does not exist, does not belong to the
+    user, or the file has not been generated yet.
+    """
+    result = await db.execute(
+        select(Export).where(
+            Export.id == export_id,
+            Export.user_id == current_user.id,
+        )
+    )
+    export = result.scalar_one_or_none()
+    if export is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Export not found")
+
+    if not export.file_url:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Export file has not been generated yet. Try again later.",
+        )
+
+    # The file_url may be an absolute container path or relative.
+    # Resolve it against the exports directory if it's not already absolute.
+    file_path = Path(export.file_url)
+    if not file_path.is_absolute():
+        file_path = Path("exports") / file_path
+
+    if not file_path.exists():
+        logger.error("Export file missing on disk: %s", file_path)
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Export file not found on disk. It may have been cleaned up.",
+        )
+
+    # Determine MIME type from the export format
+    media_types = {
+        "csv": "text/csv",
+        "json": "application/json",
+    }
+    media_type = media_types.get(
+        export.format.value if isinstance(export.format, ExportFormat) else str(export.format),
+        "application/octet-stream",
+    )
+
+    return FileResponse(
+        path=str(file_path),
+        media_type=media_type,
+        filename=file_path.name,
+    )

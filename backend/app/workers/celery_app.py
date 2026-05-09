@@ -67,15 +67,35 @@ celery_app.autodiscover_tasks(["app.workers"])
 # Dynamic per-source periodic scheduling
 # ---------------------------------------------------------------------------
 # On worker startup, read active JobSource rows from DB and register a
-# periodic scrape task for each one using its schedule_cron field.
+# periodic scrape task for each one using its ``schedule`` enum column.
+# The ``ScrapeSchedule`` enum values are mapped to crontab expressions:
+#   hourly  -> "0 * * * *"
+#   daily   -> "0 0 * * *"
+#   weekly  -> "0 0 * * 0"
+#   manual  -> skipped (no automatic schedule)
+#
 # New sources added via the API will be picked up on the next worker restart
 # or after a SIGHUP. For fully dynamic scheduling without restarts,
 # consider migrating to django-celery-beat in a future iteration.
 # ---------------------------------------------------------------------------
 
+# Map ScrapeSchedule enum values -> Celery crontab() kwargs
+_SCHEDULE_TO_CRON = {
+    "hourly": {"minute": "0", "hour": "*"},
+    "daily": {"minute": "0", "hour": "0"},
+    "weekly": {"minute": "0", "hour": "0", "day_of_week": "0"},
+    # "manual" is intentionally omitted - no periodic schedule
+}
+
+
 @celery_app.on_after_finalize.connect
 def setup_source_schedules(sender, **kwargs):
-    """Register a periodic scrape task for every active JobSource."""
+    """Register a periodic scrape task for every active JobSource.
+
+    Queries the ``schedule`` enum column (not a non-existent ``schedule_cron``
+    text column) and maps each value to a Celery crontab schedule.  Sources
+    with ``schedule = 'manual'`` are skipped entirely.
+    """
     try:
         import logging
         from sqlalchemy import create_engine, text
@@ -84,7 +104,7 @@ def setup_source_schedules(sender, **kwargs):
         sync_url = os.environ.get("DATABASE_SYNC_URL", "")
         if not sync_url:
             logging.getLogger(__name__).warning(
-                "DATABASE_SYNC_URL not set — skipping dynamic source scheduling"
+                "DATABASE_SYNC_URL not set - skipping dynamic source scheduling"
             )
             return
 
@@ -92,33 +112,25 @@ def setup_source_schedules(sender, **kwargs):
         Session = sessionmaker(bind=engine)
 
         with Session() as session:
-            # Raw query to avoid importing ORM models at celery startup
-            # (which can trigger async engine initialisation prematurely)
+            # Query the `schedule` column (enum: hourly/daily/weekly/manual)
+            # and skip sources with schedule='manual' - they have no cron.
             rows = session.execute(
                 text(
-                    "SELECT id, name, schedule_cron FROM job_sources "
-                    "WHERE is_active = true AND schedule_cron IS NOT NULL"
+                    "SELECT id, name, schedule FROM job_sources "
+                    "WHERE is_active = true AND schedule IS NOT NULL "
+                    "AND schedule != 'manual'"
                 )
             ).fetchall()
 
         for row in rows:
-            source_id, name, cron_str = row
+            source_id, name, schedule_value = row
 
-            # Parse "minute hour day month weekday" cron string
-            parts = cron_str.strip().split()
-            if len(parts) != 5:
-                continue  # skip malformed cron strings
-
-            minute, hour, day_of_month, month, day_of_week = parts
+            cron_kwargs = _SCHEDULE_TO_CRON.get(schedule_value)
+            if cron_kwargs is None:
+                continue  # unknown or manual schedule - skip
 
             sender.add_periodic_task(
-                crontab(
-                    minute=minute,
-                    hour=hour,
-                    day_of_month=day_of_month,
-                    month_of_year=month,
-                    day_of_week=day_of_week,
-                ),
+                crontab(**cron_kwargs),
                 sender.signature(
                     "app.workers.tasks.scrape_source_task",
                     args=[str(source_id)],
@@ -133,4 +145,4 @@ def setup_source_schedules(sender, **kwargs):
         logging.getLogger(__name__).error(
             "Failed to set up dynamic source schedules: %s", exc
         )
-        # Don't raise — beat must start even if DB is temporarily unavailable
+        # Don't raise - beat must start even if DB is temporarily unavailable
