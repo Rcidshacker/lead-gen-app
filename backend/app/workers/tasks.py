@@ -103,9 +103,8 @@ def scrape_source_task(self, source_id: str) -> dict:
                 db.commit()
                 return {"status": "completed", "leads_found": 0}
 
-            # ── Ingest leads into the DB ────────────────────────────────
-            leads_created = 0
-            scoring_service = LeadScoringService()
+            # ── Ingest leads and collect lead_data for batch scoring ────
+            leads_to_score: list[tuple] = []  # (Lead ORM object, lead_data dict)
 
             for item in scraped_items:
                 # ── Layer 1 dedup: URL exact match ──────────────────────
@@ -115,9 +114,7 @@ def scrape_source_task(self, source_id: str) -> dict:
                         select(Lead).where(Lead.url == item_url)
                     ).scalar_one_or_none()
                     if existing is not None:
-                        logger.debug(
-                            "Skipping duplicate lead url=%s", item_url
-                        )
+                        logger.debug("Skipping duplicate lead url=%s", item_url)
                         continue
 
                 lead_data = {
@@ -147,26 +144,29 @@ def scrape_source_task(self, source_id: str) -> dict:
                     status=LeadStatus.new,
                 )
                 db.add(lead)
-                db.flush()  # ensure ``lead.id`` is available
+                db.flush()
+                leads_to_score.append((lead, lead_data))
 
-                # ── Score the lead via AI ───────────────────────────────
+            # ── Batch score all new leads in a single event loop ────────
+            leads_created = 0
+            if leads_to_score:
                 try:
-                    score = _run_async(
-                        scoring_service.score_lead(
-                            lead_data,
-                            user_preferences=source.scrape_config.get(
-                                "user_preferences"
-                            ),
+                    all_lead_data = [ld for _, ld in leads_to_score]
+                    user_prefs = source.scrape_config.get("user_preferences")
+                    scores = _run_async(
+                        scoring_service.score_leads_batch(
+                            all_lead_data,
+                            user_preferences=user_prefs,
                         )
                     )
-                    lead.score = score
+                    for (lead, _), score in zip(leads_to_score, scores):
+                        lead.score = score
                 except Exception as exc:
-                    logger.warning(
-                        "Scoring failed for lead %s: %s", lead.id, exc
-                    )
-                    lead.score = 0.0
+                    logger.warning("Batch scoring failed: %s — defaulting all to 50", exc)
+                    for lead, _ in leads_to_score:
+                        lead.score = 50.0
 
-                leads_created += 1
+                leads_created = len(leads_to_score)
 
             # ── Finalise the job ────────────────────────────────────────
             job.status = JobStatus.completed
