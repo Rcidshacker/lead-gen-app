@@ -52,12 +52,12 @@ def _run_async(coro):
     default_retry_delay=60,
     name="app.workers.tasks.scrape_source_task",
 )
-def scrape_source_task(self, source_id: str) -> dict:
+def scrape_source_task(self, source_id: str, job_id: str | None = None) -> dict:
     """Execute the full scrape → ingest → score pipeline for *source_id*.
 
     Steps
     -----
-    1. Look up the ``JobSource`` and create a ``ScrapingJob`` record.
+    1. Look up the ``JobSource`` and resolve or create a ``ScrapingJob`` record.
     2. Use the ``ScraperEngine`` to fetch listings from the source URL.
     3. Upsert scraped items as ``Lead`` rows in the DB.
     4. Score each new lead via ``LeadScoringService``.
@@ -77,14 +77,27 @@ def scrape_source_task(self, source_id: str) -> dict:
             logger.error("JobSource %s not found", source_id)
             return {"status": "failed", "error": "Source not found"}
 
-        # ── Create a scraping job record ────────────────────────────────
-        job = ScrapingJob(
-            source_id=source_uuid,
-            celery_task_id=self.request.id,
-            status=JobStatus.running,
-            started_at=datetime.now(timezone.utc),
-        )
-        db.add(job)
+        # ── Resolve or create the scraping job record ───────────────────
+        # When triggered via API (manual scrape / retry), the endpoint
+        # pre-creates a ScrapingJob with status=pending and passes its id.
+        # When triggered via Celery beat, no job_id is provided and we
+        # create the record here.
+        if job_id is not None:
+            job = db.get(ScrapingJob, uuid.UUID(job_id))
+            if job is None:
+                logger.error("ScrapingJob %s not found — aborting", job_id)
+                return {"status": "failed", "error": "Job record not found"}
+            job.status = JobStatus.running
+            job.started_at = datetime.now(timezone.utc)
+            job.celery_task_id = self.request.id
+        else:
+            job = ScrapingJob(
+                source_id=source_uuid,
+                celery_task_id=self.request.id,
+                status=JobStatus.running,
+                started_at=datetime.now(timezone.utc),
+            )
+            db.add(job)
         db.commit()
         db.refresh(job)
 
@@ -149,6 +162,7 @@ def scrape_source_task(self, source_id: str) -> dict:
 
             # ── Batch score all new leads in a single event loop ────────
             leads_created = 0
+            scoring_service = LeadScoringService()
             if leads_to_score:
                 try:
                     all_lead_data = [ld for _, ld in leads_to_score]

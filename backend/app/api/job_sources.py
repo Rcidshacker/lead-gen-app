@@ -266,7 +266,7 @@ async def trigger_scrape(
 
     # Dispatch Celery task (non-blocking; import task lazily to avoid circular deps)
     try:
-        from app.tasks.scrape_tasks import scrape_source_task
+        from app.workers.tasks import scrape_source_task
 
         celery_task = scrape_source_task.delay(str(source_id), str(job.id))
         job.celery_task_id = celery_task.id

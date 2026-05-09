@@ -163,7 +163,7 @@ async def retry_job(
 
     # Dispatch Celery
     try:
-        from app.tasks.scrape_tasks import scrape_source_task
+        from app.workers.tasks import scrape_source_task
 
         celery_task = scrape_source_task.delay(str(source.id), str(new_job.id))
         new_job.celery_task_id = celery_task.id
