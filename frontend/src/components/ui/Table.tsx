@@ -47,7 +47,7 @@ function SkeletonRow({ cols, compact }: { cols: number; compact?: boolean }) {
 }
 
 // ─── Table Component ───
-export function DataTable<T extends Record<string, unknown>>({
+export function DataTable<T>({
   columns,
   data,
   onSort,
@@ -148,8 +148,8 @@ export function DataTable<T extends Record<string, unknown>>({
                     )}
                   >
                     {col.render
-                      ? col.render(row[col.key], row, rowIndex)
-                      : (row[col.key] as React.ReactNode) ?? '—'}
+                      ? col.render((row as Record<string, unknown>)[col.key], row, rowIndex)
+                      : ((row as Record<string, unknown>)[col.key] as React.ReactNode) ?? '—'}
                   </td>
                 ))}
               </tr>
