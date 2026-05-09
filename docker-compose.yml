@@ -1,0 +1,138 @@
+version: "3.9"
+
+services:
+  # ===========================================================================
+  # PostgreSQL Database with pgvector
+  # ===========================================================================
+  db:
+    image: pgvector/pgvector:pg16
+    container_name: leadforge-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: leadforge
+      POSTGRES_PASSWORD: leadforge
+      POSTGRES_DB: leadforge
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./backend/init.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U leadforge"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # ===========================================================================
+  # Redis — Message Broker & Cache
+  # ===========================================================================
+  redis:
+    image: redis:7-alpine
+    container_name: leadforge-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # ===========================================================================
+  # FastAPI Backend
+  # ===========================================================================
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: leadforge-backend
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://leadforge:leadforge@db:5432/leadforge
+      - REDIS_URL=redis://redis:6379/0
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+    volumes:
+      - ./backend:/app
+      - ./scraper:/scraper
+      - ./scraper_data:/app/scraper_data
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: >
+      sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload"
+
+  # ===========================================================================
+  # Celery Worker — Async Scraping Jobs
+  # ===========================================================================
+  worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: leadforge-worker
+    restart: unless-stopped
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://leadforge:leadforge@db:5432/leadforge
+      - REDIS_URL=redis://redis:6379/0
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+    volumes:
+      - ./backend:/app
+      - ./scraper:/scraper
+      - ./scraper_data:/app/scraper_data
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: celery -A app.workers.celery_app worker --loglevel=info --concurrency=2
+
+  # ===========================================================================
+  # Celery Beat — Scheduled Tasks
+  # ===========================================================================
+  beat:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: leadforge-beat
+    restart: unless-stopped
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://leadforge:leadforge@db:5432/leadforge
+      - REDIS_URL=redis://redis:6379/0
+      - CELERY_BROKER_URL=redis://redis:6379/0
+    volumes:
+      - ./backend:/app
+      - ./scraper:/scraper
+    depends_on:
+      - redis
+    command: celery -A app.workers.celery_app beat --loglevel=info
+
+  # ===========================================================================
+  # Next.js Frontend
+  # ===========================================================================
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: leadforge-frontend
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      - NEXT_PUBLIC_API_URL=http://localhost:8000
+    volumes:
+      - ./frontend/src:/app/src
+      - ./frontend/public:/app/public
+    depends_on:
+      - backend
+
+volumes:
+  postgres_data:
+  redis_data:
+  scraper_data:
