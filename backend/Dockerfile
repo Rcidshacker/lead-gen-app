@@ -2,6 +2,8 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
+ENV PYTHONPATH="/scraper:${PYTHONPATH}"
+
 # Install system deps
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential curl wget gnupg \

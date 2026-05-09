@@ -176,6 +176,33 @@ class BaseScraper(ABC):
         # Fallback — return cleaned original
         return re.sub(r"\s+", " ", salary_str.strip())
 
+
+class CustomScraper(BaseScraper):
+    """Concrete scraper for arbitrary / unrecognised job board URLs.
+
+    Used as the fallback when the URL doesn't match any known platform.
+    Applies a generic extraction prompt suitable for most job listing pages.
+    """
+
+    platform: str = "custom"
+
+    PROMPT: str = (
+        "Extract all job listings from this page. For each job, extract:\n"
+        "- title: Job title\n"
+        "- company: Company name\n"
+        "- location: Job location if available\n"
+        "- salary: Salary information if available\n"
+        "- description: Full job description or summary\n"
+        "- requirements: Key requirements or qualifications\n"
+        "- url: Direct link to the job posting\n"
+        "- skills: List of required skills if mentioned\n\n"
+        "Return a JSON array of job objects. If no jobs found, return []."
+    )
+
+    def get_prompt(self) -> str:
+        """Return the generic extraction prompt."""
+        return self.PROMPT
+
     @staticmethod
     def clean_text(text: str) -> str:
         """Clean and normalise a text field.

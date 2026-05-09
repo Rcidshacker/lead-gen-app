@@ -90,7 +90,7 @@ def scrape_source_task(self, source_id: str) -> dict:
 
         try:
             # ── Scrape using the engine ─────────────────────────────────
-            from app.scraper.engine import ScraperEngine
+            from scraper.engine import ScraperEngine
 
             engine = ScraperEngine()
             scraped_items = _run_async(engine.scrape(source))
@@ -108,6 +108,18 @@ def scrape_source_task(self, source_id: str) -> dict:
             scoring_service = LeadScoringService()
 
             for item in scraped_items:
+                # ── Layer 1 dedup: URL exact match ──────────────────────
+                item_url = item.get("url", "").strip()
+                if item_url:
+                    existing = db.execute(
+                        select(Lead).where(Lead.url == item_url)
+                    ).scalar_one_or_none()
+                    if existing is not None:
+                        logger.debug(
+                            "Skipping duplicate lead url=%s", item_url
+                        )
+                        continue
+
                 lead_data = {
                     "title": item.get("title", ""),
                     "company": item.get("company", ""),
@@ -129,7 +141,7 @@ def scrape_source_task(self, source_id: str) -> dict:
                     salary=lead_data["salary"],
                     description=lead_data["description"],
                     requirements=lead_data["requirements"],
-                    url=item.get("url", ""),
+                    url=item_url,
                     raw_data=item.get("raw_data", {}),
                     contact_info=item.get("contact_info", {}),
                     status=LeadStatus.new,

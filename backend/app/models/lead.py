@@ -72,6 +72,8 @@ class Lead(Base):
     url: Mapped[str] = mapped_column(
         Text,
         nullable=False,
+        unique=True,
+        index=True,
     )
     raw_data: Mapped[dict] = mapped_column(
         JSONB,

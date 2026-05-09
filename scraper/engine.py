@@ -8,6 +8,7 @@ from typing import Any, Optional
 from urllib.parse import urlparse
 
 from loguru import logger
+from scraper.utils.rate_limiter import RateLimiter
 
 
 @dataclass
@@ -57,6 +58,16 @@ class ScraperEngine:
     def __init__(self, config: Optional[ScraperConfig] = None) -> None:
         self.config = config or ScraperConfig()
         self._graph: Any = None
+        self._rate_limiter = RateLimiter(default_rate=1.0)
+        # Per-platform conservative limits — these sites block aggressive scrapers
+        self._rate_limiter.set_rate("www.linkedin.com", 0.25)   # 1 req / 4s
+        self._rate_limiter.set_rate("linkedin.com", 0.25)
+        self._rate_limiter.set_rate("www.naukri.com", 0.5)      # 1 req / 2s
+        self._rate_limiter.set_rate("naukri.com", 0.5)
+        self._rate_limiter.set_rate("www.upwork.com", 0.33)     # 1 req / 3s
+        self._rate_limiter.set_rate("upwork.com", 0.33)
+        self._rate_limiter.set_rate("www.indeed.com", 0.5)
+        self._rate_limiter.set_rate("indeed.com", 0.5)
         logger.info(f"ScraperEngine initialized with model={self.config.model}")
 
     # ------------------------------------------------------------------
@@ -183,6 +194,12 @@ class ScraperEngine:
 
         url: str = getattr(source, "url", str(source))
         platform: str = self._detect_platform(url)
+
+        # Apply per-domain rate limit before any network activity
+        _domain = urlparse(url).hostname or "unknown"
+        self._rate_limiter.acquire(_domain)
+        logger.info(f"Rate limit cleared for domain={_domain}")
+
         scrape_config: dict = getattr(source, "scrape_config", {}) or {}
 
         logger.info(f"Starting scrape: platform={platform}, url={url}")
