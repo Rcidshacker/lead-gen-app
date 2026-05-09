@@ -45,12 +45,26 @@ function isTokenExpired(token: string): boolean {
 
 // ─── Auth Functions ───
 export async function login(email: string, password: string): Promise<LoginResponse> {
-  const data = await apiClient.post<LoginResponse>('/api/v1/auth/login', {
-    email,
-    password,
+  // FastAPI OAuth2PasswordRequestForm requires form-encoded data, NOT JSON.
+  // The field name must be "username" (OAuth2 spec — even if it holds an email).
+  const formData = new URLSearchParams({
+    username: email,
+    password: password,
   });
 
-  // Store tokens
+  const response = await fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'}/api/v1/auth/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: formData.toString(),
+  });
+
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ detail: 'Login failed' }));
+    throw new Error(error.detail || 'Login failed');
+  }
+
+  const data: LoginResponse = await response.json();
+
   if (typeof window !== 'undefined') {
     localStorage.setItem('access_token', data.access_token);
     if (data.refresh_token) {
