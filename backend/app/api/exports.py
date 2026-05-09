@@ -69,13 +69,13 @@ async def create_export(
 
     # Dispatch Celery task
     try:
-        from app.tasks.export_tasks import generate_export_task
+        from app.workers.tasks import generate_export_task
 
         generate_export_task.delay(
             str(export.id),
-            str(current_user.id),
-            fmt.value,
             payload.filters,
+            fmt.value,
+            str(current_user.id),
         )
     except Exception as exc:
         logger.exception("Failed to dispatch export task")

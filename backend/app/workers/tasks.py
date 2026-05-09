@@ -261,7 +261,12 @@ def score_lead_task(lead_id: str) -> dict:
 @celery_app.task(
     name="app.workers.tasks.generate_export_task",
 )
-def generate_export_task(export_id: str, filters: dict | None = None, format: str = "csv") -> dict:
+def generate_export_task(
+    export_id: str,
+    filters: dict | None = None,
+    format: str = "csv",
+    user_id: str | None = None,
+) -> dict:
     """Build an export file and persist the path in the ``Export`` record.
 
     Parameters
@@ -272,6 +277,9 @@ def generate_export_task(export_id: str, filters: dict | None = None, format: st
         Optional dict of query filters (``min_score``, ``status``, etc.).
     format:
         ``"csv"`` or ``"json"``.
+    user_id:
+        UUID of the requesting user — used to scope leads to that user's
+        sources only.  Prevents cross-user data exposure.
     """
     export_uuid = uuid.UUID(export_id)
     filters = filters or {}
@@ -283,8 +291,14 @@ def generate_export_task(export_id: str, filters: dict | None = None, format: st
             return {"status": "failed", "error": "Export not found"}
 
         try:
-            # ── Query leads with optional filters ───────────────────────
-            query = select(Lead).where(Lead.source_id.isnot(None))
+            # ── Query leads scoped to the requesting user ──────────────
+            query = (
+                select(Lead)
+                .join(JobSource, Lead.source_id == JobSource.id)
+            )
+
+            if user_id is not None:
+                query = query.where(JobSource.user_id == uuid.UUID(user_id))
 
             if "min_score" in filters:
                 query = query.where(Lead.score >= float(filters["min_score"]))
@@ -294,6 +308,9 @@ def generate_export_task(export_id: str, filters: dict | None = None, format: st
                 query = query.where(Lead.status == filters["status"])
             if "platform" in filters:
                 query = query.where(Lead.platform == filters["platform"])
+
+            # Always require a valid source
+            query = query.where(Lead.source_id.isnot(None))
 
             # Order by score descending
             query = query.order_by(Lead.score.desc())
