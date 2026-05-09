@@ -15,6 +15,7 @@ Initial migration capturing the full LeadForge schema:
 from typing import Sequence, Union
 
 import sqlalchemy as sa
+from pgvector.sqlalchemy import Vector
 from sqlalchemy.dialects import postgresql
 
 from alembic import op
@@ -159,7 +160,7 @@ def upgrade() -> None:
             nullable=False,
             server_default="new",
         ),
-        sa.Column("embedding", sa.Vector(1536), nullable=True),
+        sa.Column("embedding", Vector(1536), nullable=True),
         sa.Column(
             "created_at",
             sa.DateTime(timezone=True),
