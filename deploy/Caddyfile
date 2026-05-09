@@ -1,0 +1,44 @@
+{$DOMAIN:leadforge.dev} {
+    # Automatic HTTPS via Let's Encrypt
+    encode gzip zstd
+
+    # Security headers
+    header {
+        X-Content-Type-Options "nosniff"
+        X-Frame-Options "DENY"
+        X-XSS-Protection "1; mode=block"
+        Referrer-Policy "strict-origin-when-cross-origin"
+        Permissions-Policy "camera=(), microphone=(), geolocation=()"
+    }
+
+    # API + WebSocket (FastAPI backend)
+    handle /api/* {
+        reverse_proxy backend:8000
+    }
+
+    handle /ws {
+        reverse_proxy backend:8000 {
+            header_up Connection {>Connection}
+            header_up Upgrade {>Upgrade}
+        }
+    }
+
+    handle /health {
+        reverse_proxy backend:8000
+    }
+
+    handle /ready {
+        reverse_proxy backend:8000
+    }
+
+    # Frontend (Next.js) — catch-all
+    handle {
+        reverse_proxy frontend:3000
+    }
+
+    # Logging
+    log {
+        output file /var/log/caddy/access.log
+        format console
+    }
+}

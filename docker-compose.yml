@@ -22,6 +22,10 @@ services:
       interval: 5s
       timeout: 5s
       retries: 5
+    deploy:
+      resources:
+        limits:
+          memory: 1G
 
   # ===========================================================================
   # Redis — Message Broker & Cache
@@ -39,6 +43,10 @@ services:
       interval: 5s
       timeout: 5s
       retries: 5
+    deploy:
+      resources:
+        limits:
+          memory: 256M
 
   # ===========================================================================
   # FastAPI Backend
@@ -61,6 +69,7 @@ services:
       - ./backend:/app
       - ./scraper:/scraper
       - ./scraper_data:/app/scraper_data
+      - exports_data:/app/exports
     depends_on:
       db:
         condition: service_healthy
@@ -68,6 +77,10 @@ services:
         condition: service_healthy
     command: >
       sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload"
+    deploy:
+      resources:
+        limits:
+          memory: 512M
 
   # ===========================================================================
   # Celery Worker — Async Scraping Jobs
@@ -88,12 +101,19 @@ services:
       - ./backend:/app
       - ./scraper:/scraper
       - ./scraper_data:/app/scraper_data
+      - exports_data:/app/exports
     depends_on:
       db:
         condition: service_healthy
       redis:
         condition: service_healthy
     command: celery -A app.workers.celery_app worker --loglevel=info --concurrency=2
+    deploy:
+      resources:
+        limits:
+          # Playwright-headless chrome is memory-hungry (~300-500MB per instance).
+          # 1.5G allows 2 concurrent workers with headroom.
+          memory: 1536M
 
   # ===========================================================================
   # Celery Beat — Scheduled Tasks
@@ -116,6 +136,10 @@ services:
     depends_on:
       - redis
     command: celery -A app.workers.celery_app beat --loglevel=info
+    deploy:
+      resources:
+        limits:
+          memory: 256M
 
   # ===========================================================================
   # Next.js Frontend
@@ -135,8 +159,45 @@ services:
       - ./frontend/public:/app/public
     depends_on:
       - backend
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+
+  # ===========================================================================
+  # Caddy — Reverse Proxy with Automatic TLS (Production)
+  # ===========================================================================
+  # Uncomment this service for production deployment behind Caddy.
+  # Caddy handles automatic Let's Encrypt certificate provisioning.
+  #
+  # Usage:
+  #   1. Set DOMAIN env var: export DOMAIN=yourdomain.com
+  #   2. Uncomment the caddy service below
+  #   3. Remove port mappings from backend and frontend services
+  #   4. docker compose up -d caddy
+  #
+  # caddy:
+  #   image: caddy:2-alpine
+  #   container_name: leadforge-caddy
+  #   restart: unless-stopped
+  #   ports:
+  #     - "80:80"
+  #     - "443:443"
+  #     - "443:443/udp"  # HTTP/3
+  #   environment:
+  #     - DOMAIN=${DOMAIN:-leadforge.dev}
+  #   volumes:
+  #     - ./deploy/Caddyfile:/etc/caddy/Caddyfile
+  #     - caddy_data:/data
+  #     - caddy_config:/config
+  #   depends_on:
+  #     - backend
+  #     - frontend
 
 volumes:
   postgres_data:
   redis_data:
   scraper_data:
+  exports_data:
+  # caddy_data:
+  # caddy_config:

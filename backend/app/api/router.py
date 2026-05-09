@@ -8,6 +8,7 @@ from app.api.exports import router as exports_router
 from app.api.job_sources import router as sources_router
 from app.api.scraping_jobs import router as jobs_router
 from app.api.leads import router as leads_router
+from app.api.websocket import router as ws_router
 
 api_router = APIRouter()
 
@@ -20,3 +21,6 @@ api_router.include_router(leads_router)
 api_router.include_router(jobs_router)
 api_router.include_router(exports_router)
 api_router.include_router(dashboard_router)
+
+# ── WebSocket (real-time updates) ───────────────────────────────────
+api_router.include_router(ws_router)
