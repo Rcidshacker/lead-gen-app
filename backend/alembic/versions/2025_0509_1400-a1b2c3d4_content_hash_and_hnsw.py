@@ -16,6 +16,7 @@ from pgvector.sqlalchemy import Vector
 from sqlalchemy.dialects import postgresql
 
 from alembic import op
+from sqlalchemy import text
 
 revision: str = "a1b2c3d4_content_hash"
 down_revision: Union[str, None] = "beb72cc_initial"
@@ -49,12 +50,12 @@ def upgrade() -> None:
     # Parameters:
     #   m = 16       — max number of connections per layer (default 16)
     #   ef_construction = 64 — size of dynamic candidate list during build
-    op.execute("""
-        CREATE INDEX IF NOT EXISTS ix_leads_embedding_hnsw
-        ON leads
-        USING hnsw (embedding vector_cosine_ops)
-        WITH (m = 16, ef_construction = 64);
-    """)
+    op.execute(text(
+        "CREATE INDEX IF NOT EXISTS ix_leads_embedding_hnsw "
+        "ON leads "
+        "USING hnsw (embedding vector_cosine_ops) "
+        "WITH (m = 16, ef_construction = 64);"
+    ))
 
 
 def downgrade() -> None:

@@ -10,7 +10,7 @@ import { Button } from '@/components/ui/Button';
 import type { LeadFilters } from '@/types/lead';
 
 // ─── Leads Page ───
-export default function LeadsPage() {
+function LeadsContent() {
   const searchParams = useSearchParams();
 
   const [page, setPage] = useState(1);
@@ -126,5 +126,13 @@ export default function LeadsPage() {
         </div>
       )}
     </AppShell>
+  );
+}
+
+export default function LeadsPage() {
+  return (
+    <React.Suspense fallback={<div className="flex h-screen items-center justify-center text-slate-500">Loading leads data...</div>}>
+      <LeadsContent />
+    </React.Suspense>
   );
 }

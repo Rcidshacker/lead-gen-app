@@ -136,9 +136,15 @@ export default function SettingsPage() {
                 <CardTitle>API Keys</CardTitle>
               </CardHeader>
               <CardBody className="space-y-5">
+                <div className="rounded-lg bg-blue-50 border border-blue-200 px-4 py-3">
+                  <p className="text-sm text-blue-800">
+                    <strong>Note:</strong> API keys are configured server-side via the <code className="bg-blue-100 px-1 rounded">.env</code> file.
+                    Changes here are not yet persisted — this UI is a placeholder for a future per-user key override feature.
+                  </p>
+                </div>
                 <div>
                   <label className="block text-sm font-medium text-slate-700 mb-1.5">
-                    OpenAI API Key
+                    OpenRouter / OpenAI API Key
                   </label>
                   <div className="flex items-center gap-2">
                     <div className="relative flex-1">
@@ -178,7 +184,8 @@ export default function SettingsPage() {
                     </Button>
                   </div>
                   <p className="mt-1.5 text-xs text-slate-500">
-                    Used for AI-powered lead scoring and analysis.
+                    Supports OpenRouter keys (<code>sk-or-v1-...</code>) and standard OpenAI keys (<code>sk-...</code>).
+                    Set <code>OPENAI_BASE_URL=https://openrouter.ai/api/v1</code> in .env to use OpenRouter.
                   </p>
                 </div>
 

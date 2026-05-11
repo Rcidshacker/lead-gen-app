@@ -17,8 +17,6 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, Query, WebSocket, WebSocketDisconnect
 
-from app.api.deps import get_current_user_ws
-
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["WebSocket"])
@@ -158,13 +156,14 @@ async def websocket_endpoint(
         {"type": "job_completed", "job_id": "...", ...}
         {"type": "job_failed", "job_id": "...", ...}
     """
-    from app.api.deps import get_current_user
-
     # Authenticate via JWT token in query param
     try:
-        from app.api.deps import oauth2_scheme
-        user = await get_current_user(token=token)
-        user_id = str(user.id)
+        from app.api.deps import verify_token
+        token_data = verify_token(token)
+        import uuid
+        user_id = token_data.sub
+        # Validate UUID format
+        uuid.UUID(user_id)
     except Exception:
         await websocket.close(code=4001, reason="Authentication failed")
         return

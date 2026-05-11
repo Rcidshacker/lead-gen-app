@@ -13,7 +13,7 @@ services:
       POSTGRES_PASSWORD: leadforge
       POSTGRES_DB: leadforge
     ports:
-      - "5432:5432"
+      - "5433:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./backend/init.sql:/docker-entrypoint-initdb.d/init.sql
@@ -53,12 +53,14 @@ services:
   # ===========================================================================
   backend:
     build:
-      context: ./backend
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: backend/Dockerfile
     container_name: leadforge-backend
     restart: unless-stopped
     ports:
       - "8000:8000"
+    env_file:
+      - .env
     environment:
       - DATABASE_URL=postgresql+asyncpg://leadforge:leadforge@db:5432/leadforge
       - DATABASE_SYNC_URL=postgresql://leadforge:leadforge@db:5432/leadforge
@@ -87,10 +89,12 @@ services:
   # ===========================================================================
   worker:
     build:
-      context: ./backend
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: backend/Dockerfile
     container_name: leadforge-worker
     restart: unless-stopped
+    env_file:
+      - .env
     environment:
       - DATABASE_URL=postgresql+asyncpg://leadforge:leadforge@db:5432/leadforge
       - DATABASE_SYNC_URL=postgresql://leadforge:leadforge@db:5432/leadforge
@@ -120,10 +124,12 @@ services:
   # ===========================================================================
   beat:
     build:
-      context: ./backend
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: backend/Dockerfile
     container_name: leadforge-beat
     restart: unless-stopped
+    env_file:
+      - .env
     environment:
       - DATABASE_URL=postgresql+asyncpg://leadforge:leadforge@db:5432/leadforge
       - DATABASE_SYNC_URL=postgresql://leadforge:leadforge@db:5432/leadforge
