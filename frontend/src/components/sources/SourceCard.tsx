@@ -41,7 +41,7 @@ export function SourceCard({ source, onScrape, onDelete, scraping }: SourceCardP
         <Badge className={cn('text-xs', platformColor)}>
           {capitalize(source.platform)}
         </Badge>
-        <StatusBadge status={source.status} />
+        <StatusBadge status={source.status || (source.is_active ? 'active' : 'paused')} />
       </div>
 
       {/* Name */}

@@ -18,6 +18,7 @@ class NaukriScraper(BaseScraper):
     """
 
     platform: str = "naukri"
+    needs_stealth_browser: bool = True
 
     PROMPT: str = (
         "Extract all job listings from this Naukri page. For each job, extract "

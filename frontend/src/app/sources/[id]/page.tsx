@@ -88,7 +88,7 @@ export default function SourceDetailPage() {
             <div>
               <div className="flex items-center gap-3 mb-2">
                 <h2 className="text-xl font-bold text-slate-900">{source.name}</h2>
-                <StatusBadge status={source.status} />
+                <StatusBadge status={source.status || (source.is_active ? 'active' : 'paused')} />
               </div>
               <div className="flex flex-wrap items-center gap-4 text-sm text-slate-500">
                 <Badge variant="default" size="md">

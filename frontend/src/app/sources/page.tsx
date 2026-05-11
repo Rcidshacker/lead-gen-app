@@ -41,17 +41,15 @@ export default function SourcesPage() {
     try {
       await createSource.mutateAsync({
         name: formData.name,
-        platform: formData.platform,
+        platform: formData.platform.toLowerCase(),
         url: formData.url,
-        config: {
-          keywords: [],
-          locations: [],
+        scrape_config: {
           max_pages: formData.max_pages,
+          delay: 2,
+          extract_fields: [],
+          headless: true,
         },
-        schedule: {
-          frequency: formData.schedule === 'hourly' ? 'daily' : formData.schedule === 'manual' ? 'daily' : (formData.schedule as 'daily' | 'weekly' | 'biweekly' | 'monthly'),
-          enabled: formData.schedule !== 'manual',
-        },
+        schedule: formData.schedule === 'hourly' ? 'daily' : formData.schedule,
       });
       setShowCreateModal(false);
     } catch {

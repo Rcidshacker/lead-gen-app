@@ -23,6 +23,10 @@ class BaseScraper(ABC):
     platform: str = "custom"
     """Identifier used in the :data:`SCRAPER_REGISTRY`."""
 
+    needs_stealth_browser: bool = False
+    """Set True for sites that block standard headless Chromium (e.g. Akamai WAF).
+    The engine will pre-fetch via camoufox and pass rendered HTML to the LLM."""
+
     def __init__(self, config: Optional[ScraperConfig] = None) -> None:
         self.config = config or ScraperConfig()
         self.logger = logging.getLogger(f"scraper.{self.platform}")

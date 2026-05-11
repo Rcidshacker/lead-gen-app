@@ -73,9 +73,12 @@ const statusVariantMap: Record<string, keyof typeof variantStyles> = {
 };
 
 export function StatusBadge({ status, size = 'sm' }: StatusBadgeProps) {
+  const safeString = typeof status === 'string' ? status : (status === true ? 'active' : (status === false ? 'inactive' : 'unknown'));
+  const safeStatus = safeString.toLowerCase();
+  
   return (
-    <Badge variant={statusVariantMap[status] || 'default'} size={size} dot>
-      {status.charAt(0).toUpperCase() + status.slice(1)}
+    <Badge variant={statusVariantMap[safeStatus] || 'default'} size={size} dot>
+      {safeString.charAt(0).toUpperCase() + safeString.slice(1)}
     </Badge>
   );
 }

@@ -25,7 +25,8 @@ export interface JobSource {
   name: string;
   platform: PlatformType;
   url: string;
-  status: SourceStatus;
+  status?: SourceStatus;
+  is_active?: boolean;
   config: ScrapeConfig;
   schedule: ScrapeSchedule;
   last_scraped_at?: string;
@@ -35,12 +36,19 @@ export interface JobSource {
   updated_at: string;
 }
 
+export interface BackendScrapeConfig {
+  max_pages: number;
+  delay?: number;
+  extract_fields?: string[];
+  headless?: boolean;
+}
+
 export interface SourceCreatePayload {
   name: string;
-  platform: PlatformType;
+  platform: string;
   url: string;
-  config: ScrapeConfig;
-  schedule?: ScrapeSchedule;
+  scrape_config?: BackendScrapeConfig;
+  schedule?: string;
 }
 
 export interface SourceUpdatePayload {

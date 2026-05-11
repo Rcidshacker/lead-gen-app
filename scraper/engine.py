@@ -4,6 +4,7 @@ Implements a layered LLM fallback strategy so that scraping remains resilient
 even when the primary model hallucinates, times out, or returns empty results.
 """
 
+import asyncio
 import logging
 import os
 from dataclasses import dataclass, field
@@ -248,18 +249,38 @@ class ScraperEngine:
         scraper = scraper_class(config=self.config)
         prompt: str = scraper.get_prompt()
 
+        # Sites behind Akamai/Cloudflare block standard headless Chrome.
+        # Pre-fetch rendered HTML via camoufox and pass as a string source so
+        # SmartScraperGraph skips its own fetch step entirely.
+        llm_source: str = url
+        if scraper.needs_stealth_browser:
+            logger.info(f"Stealth browser required for {platform}, pre-fetching via camoufox")
+            llm_source = await self._fetch_with_camoufox(url)
+            if not llm_source:
+                raise RuntimeError(f"camoufox returned empty content for {url}")
+            logger.info(f"camoufox fetched {len(llm_source)} bytes for {url}")
+
         # ── Layered LLM fallback strategy ──────────────────────────────
         last_error: Exception | None = None
         models_to_try = self.config.all_models
 
+        loop = asyncio.get_event_loop()
+
         for model_name in models_to_try:
             try:
-                result = await self._scrape_with_model(
-                    prompt=prompt,
-                    source=url,
-                    model_name=model_name,
-                    api_key=os.getenv("OPENAI_API_KEY", ""),
-                    base_url=os.getenv("OPENAI_BASE_URL"),
+                # SmartScraperGraph.run() calls asyncio.run() internally; run it
+                # in a thread so it gets its own clean event loop context.
+                import functools
+                result = await loop.run_in_executor(
+                    None,
+                    functools.partial(
+                        self._scrape_with_model_sync,
+                        prompt=prompt,
+                        source=llm_source,
+                        model_name=model_name,
+                        api_key=os.getenv("OPENAI_API_KEY", ""),
+                        base_url=os.getenv("OPENAI_BASE_URL"),
+                    ),
                 )
 
                 if not result:
@@ -299,7 +320,107 @@ class ScraperEngine:
             raise last_error
         return []
 
-    async def _scrape_with_model(
+    async def _fetch_with_camoufox(self, url: str) -> str:
+        """Fetch rendered page HTML via camoufox (anti-bot Firefox fork).
+
+        Used for sites protected by Akamai, Cloudflare, or similar WAFs that
+        block standard headless Chromium.  Waits for any JS job-card selector
+        to appear before capturing the full DOM.
+
+        Args:
+            url: Target URL to fetch.
+
+        Returns:
+            Full rendered HTML as a string, or empty string on failure.
+        """
+        try:
+            from camoufox.async_api import AsyncCamoufox  # type: ignore[import-untyped]
+        except ImportError:
+            logger.error("camoufox not installed. Run: pip install 'camoufox[geoip]'")
+            return ""
+
+        try:
+            async with AsyncCamoufox(headless=True, os="windows") as browser:
+                page = await browser.new_page()
+                await page.goto(url, wait_until="networkidle", timeout=30_000)
+                # Best-effort wait for job card container
+                try:
+                    await page.wait_for_selector(
+                        "article.jobTuple, [data-job-id], [class*='srp-jobtuple'], "
+                        "[class*='job-tuple'], [class*='jobCard']",
+                        timeout=8_000,
+                    )
+                except Exception:
+                    pass  # proceed with whatever rendered
+                html = await page.content()
+
+            # Strip script/style/meta noise so the LLM sees only visible DOM
+            cleaned = self._strip_noise_from_html(html)
+            logger.info(
+                f"camoufox fetched {len(html)} bytes → {len(cleaned)} bytes "
+                f"after stripping noise from {url}"
+            )
+            return cleaned
+        except Exception as exc:
+            logger.error(f"camoufox fetch failed for {url}: {exc}")
+            return ""
+
+    @staticmethod
+    def _strip_noise_from_html(html: str) -> str:
+        """Extract only job-card elements from HTML (or strip noise as fallback).
+
+        Strategy:
+        1. Try known job-card selectors to return only the listing section.
+        2. Fall back to full HTML with script/style/meta stripped.
+
+        This keeps the LLM context focused on actual job data.
+        """
+        try:
+            from bs4 import BeautifulSoup  # type: ignore[import-untyped]
+
+            soup = BeautifulSoup(html, "lxml")
+
+            # Try to isolate job listing containers first
+            job_card_selectors = [
+                "article.jobTuple",
+                "[data-job-id]",
+                "[class*='srp-jobtuple']",
+                "[class*='job-tuple']",
+                "[class*='jobCard']",
+                "[class*='job_card']",
+                "li.job-posting",
+                "div.job-container",
+            ]
+            cards = []
+            for sel in job_card_selectors:
+                cards = soup.select(sel)
+                if cards:
+                    break
+
+            if cards:
+                # Cap at 10 cards so free LLMs don't time out
+                cards = cards[:10]
+                # Convert to plain text (title + company + location + URL per line)
+                # This slashes token count vs raw HTML
+                lines = []
+                for card in cards:
+                    text = " | ".join(card.stripped_strings)
+                    href = ""
+                    link = card.find("a", href=True)
+                    if link:
+                        href = link.get("href", "")
+                    lines.append(f"{text} | URL: {href}")
+                plain_text = "\n".join(lines)
+                return f"<html><body><pre>{plain_text}</pre></body></html>"
+
+            # Fallback: strip all noise from full page
+            for tag in soup(["script", "style", "link", "meta", "noscript", "svg", "path", "img"]):
+                tag.decompose()
+            return str(soup)
+        except Exception:
+            return html  # last resort
+
+    def _scrape_with_model_sync(
         self,
         prompt: str,
         source: str,
@@ -328,23 +449,65 @@ class ScraperEngine:
             Raw result from ``SmartScraperGraph.run()``.
         """
         from scrapegraphai.graphs import SmartScraperGraph  # type: ignore[import-untyped]
+        from scrapegraphai.graphs.abstract_graph import AbstractGraph  # type: ignore[import-untyped]
 
-        llm_config: dict[str, Any] = {
-            "model": model_name,
-            "temperature": self.config.temperature,
-            "api_key": api_key,
-        }
+        # ScrapeGraphAI v1.6 _set_model_token only handles a fixed set of LLM
+        # types. When model_instance is a plain ChatOpenAI the attribute is never
+        # set, causing _create_graph to raise AttributeError. Patch it once per
+        # call so the configured token limit is always available.
+        _orig_create_llm = AbstractGraph._create_llm
+
+        def _patched_create_llm(self_graph, llm_cfg, chat=False):
+            result = _orig_create_llm(self_graph, llm_cfg, chat)
+            if not hasattr(self_graph, "model_token"):
+                self_graph.model_token = llm_cfg.get("model_tokens", 8192)
+            return result
+
+        AbstractGraph._create_llm = _patched_create_llm
+
+        embeddings_config: dict[str, Any] | None = None
+
         if base_url:
-            llm_config["base_url"] = base_url
+            # ScrapeGraphAI v1.6 only recognises a fixed set of model-name prefixes.
+            # For any custom OpenAI-compatible endpoint (OpenRouter, etc.) bypass
+            # that detection entirely by passing pre-built LangChain instances.
+            from langchain_openai import ChatOpenAI, OpenAIEmbeddings  # type: ignore[import-untyped]
+
+            llm_config: dict[str, Any] = {
+                "model_instance": ChatOpenAI(
+                    model=model_name,
+                    api_key=api_key,
+                    base_url=base_url,
+                    temperature=self.config.temperature,
+                ),
+                "model_tokens": int(os.getenv("SGAI_MAX_TOKENS", "4096")),
+            }
+            embeddings_config = {
+                "model_instance": OpenAIEmbeddings(
+                    model="text-embedding-ada-002",
+                    api_key=api_key,
+                    base_url=base_url,
+                )
+            }
+        else:
+            llm_config = {
+                "model": model_name,
+                "temperature": self.config.temperature,
+                "api_key": api_key,
+            }
+
+        graph_config: dict[str, Any] = {
+            "llm": llm_config,
+            "headless": self.config.headless,
+            "verbose": self.config.verbose,
+        }
+        if embeddings_config is not None:
+            graph_config["embeddings"] = embeddings_config
 
         self._graph = SmartScraperGraph(
             prompt=prompt,
             source=source,
-            config={
-                "llm": llm_config,
-                "headless": self.config.headless,
-                "verbose": self.config.verbose,
-            },
+            config=graph_config,
         )
 
         result: Any = self._graph.run()
