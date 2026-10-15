@@ -90,3 +90,17 @@ coverage.xml
 # Credentials
 # =============================================================================
 .git/credentials
+
+# graft's local graph cache — regenerable, not committed (run `graft build`).
+/graft/
+
+# Credentials, dumps and generated files (never commit)
+token.json
+demo_token.json
+demo_job_id.txt
+db-backups/
+*_payload.json
+*_resp.json
+backend/celerybeat-schedule
+*.pem
+*.key
